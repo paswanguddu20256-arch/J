@@ -1,0 +1,119 @@
+Build Bablu DJ Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build & Package Android Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin" ]; then
+            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          fi
+
+      - name: Setup Gradle CLI 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          validate-wrappers: false
+
+      - name: Prepare Android Project & Keystore
+        run: |
+          echo "=== 1. Detecting Android Project Directory ==="
+          SETTINGS_FILE=$(find . -maxdepth 3 \( -name "settings.gradle.kts" -o -name "settings.gradle" \) -printf '%h\n' | head -n 1)
+          if [ -z "$SETTINGS_FILE" ]; then
+            PROJECT_DIR="."
+          else
+            PROJECT_DIR="$SETTINGS_FILE"
+          fi
+          echo "Found Android Project at: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+
+          cd "$PROJECT_DIR"
+
+          echo "=== 2. Ensuring Gradle Wrapper ==="
+          if [ ! -f "gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "Gradle wrapper or jar missing. Generating with Gradle CLI..."
+            gradle wrapper --gradle-version 9.3.1
+          fi
+          chmod +x gradlew || true
+          ls -la gradlew
+
+          echo "=== 3. Ensuring Debug Keystore ==="
+          if [ ! -f "debug.keystore" ]; then
+            if [ -f "debug.keystore.base64" ]; then
+              echo "Restoring debug.keystore from base64..."
+              base64 -d debug.keystore.base64 > debug.keystore
+            elif [ -f "$GITHUB_WORKSPACE/debug.keystore.base64" ]; then
+              echo "Restoring debug.keystore from root base64..."
+              base64 -d "$GITHUB_WORKSPACE/debug.keystore.base64" > debug.keystore
+            else
+              echo "Generating standard debug.keystore..."
+              keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+          ls -la debug.keystore
+
+      - name: Compile Debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          echo "Building APK in $PROJECT_DIR..."
+          if [ -f "./gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "Executing ./gradlew :app:assembleDebug"
+            ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          else
+            echo "Executing gradle :app:assembleDebug"
+            gradle :app:assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Locate and Stage app-debug.apk
+        run: |
+          cd "$PROJECT_DIR"
+          echo "Locating built APK..."
+          FOUND_APK=$(find . -name "*.apk" -path "*/build/outputs/apk/debug/*" | head -n 1)
+          if [ -z "$FOUND_APK" ]; then
+            FOUND_APK=$(find . -name "*debug*.apk" | head -n 1)
+          fi
+
+          if [ -n "$FOUND_APK" ] && [ -f "$FOUND_APK" ]; then
+            echo "Found APK: $FOUND_APK"
+            mkdir -p "$GITHUB_WORKSPACE/apk-artifact"
+            cp "$FOUND_APK" "$GITHUB_WORKSPACE/apk-artifact/app-debug.apk"
+            ls -lh "$GITHUB_WORKSPACE/apk-artifact/app-debug.apk"
+          else
+            echo "FATAL: app-debug.apk was not found after build!"
+            find . -name "*.apk" || true
+            exit 1
+          fi
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug.apk
+          path: apk-artifact/app-debug.apk
+          retention-days: 14
+          if-no-files-found: error
